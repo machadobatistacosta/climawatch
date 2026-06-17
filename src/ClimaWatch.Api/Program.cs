@@ -155,6 +155,38 @@ app.MapGet("/api/weather-checks/{id:guid}", async (
     });
 });
 
+app.MapGet("/api/weather-checks/{id:guid}/snapshot", async (
+    Guid id,
+    ClimaWatchDbContext dbContext,
+    CancellationToken cancellationToken) =>
+{
+    var snapshot = await dbContext.WeatherSnapshots
+        .AsNoTracking()
+        .FirstOrDefaultAsync(s => s.WeatherCheckId == id, cancellationToken);
+
+    if (snapshot == null)
+    {
+        return Results.NotFound();
+    }
+
+    return Results.Ok(new
+    {
+        weatherSnapshotId = snapshot.Id,
+        weatherCheckId = snapshot.WeatherCheckId,
+        locationName = snapshot.LocationName,
+        countryCode = snapshot.CountryCode,
+        latitude = snapshot.Latitude,
+        longitude = snapshot.Longitude,
+        timezone = snapshot.Timezone,
+        temperatureC = snapshot.TemperatureC,
+        apparentTemperatureC = snapshot.ApparentTemperatureC,
+        precipitationMm = snapshot.PrecipitationMm,
+        windSpeedKmh = snapshot.WindSpeedKmh,
+        weatherCode = snapshot.WeatherCode,
+        observedAtUtc = snapshot.ObservedAtUtc
+    });
+});
+
 app.Run();
 
 public record WeatherCheckRequest(string? City);

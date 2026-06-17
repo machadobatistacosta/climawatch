@@ -1,4 +1,5 @@
 using System;
+using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -180,24 +181,7 @@ public sealed class QueueConsumerWorker : BackgroundService
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Erro temporário ao acessar o banco de dados para buscar WeatherCheck {WeatherCheckId}. Enviando NACK (requeue: true).", message.WeatherCheckId);
-                    
-                    try
-                    {
-                        await Task.Delay(2000, stoppingToken);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        return;
-                    }
-
-                    try
-                    {
-                        await _channel.BasicNackAsync(deliveryTag: ea.DeliveryTag, multiple: false, requeue: true);
-                    }
-                    catch (Exception nackEx)
-                    {
-                        _logger.LogError(nackEx, "Erro ao enviar NACK com requeue para {WeatherCheckId}", message.WeatherCheckId);
-                    }
+                    await HandleTransientErrorAsync(ea.DeliveryTag, stoppingToken);
                     return;
                 }
 
@@ -251,40 +235,69 @@ public sealed class QueueConsumerWorker : BackgroundService
                 {
                     try
                     {
-                        weatherCheck.Status = WeatherCheckStatuses.Processed;
-                        weatherCheck.ProcessedAtUtc = DateTimeOffset.UtcNow;
-                        
-                        await dbContext.SaveChangesAsync(stoppingToken);
-                        
-                        _logger.LogInformation("Mensagem processada com sucesso. WeatherCheckId: {WeatherCheckId}, EventId: {EventId}, CorrelationId: {CorrelationId}, City: {City}, Status: processed",
-                            weatherCheck.Id,
-                            weatherCheck.EventId,
-                            weatherCheck.CorrelationId,
-                            weatherCheck.City);
+                        var openMeteoClient = scope.ServiceProvider.GetRequiredService<OpenMeteoClient>();
 
-                        await _channel.BasicAckAsync(deliveryTag: ea.DeliveryTag, multiple: false);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Erro ao atualizar status ou salvar alterações para WeatherCheck {WeatherCheckId}. Enviando NACK (requeue: true).", message.WeatherCheckId);
-                        
-                        try
+                        // Consultar coordenadas
+                        var coordinates = await openMeteoClient.GetCoordinatesAsync(weatherCheck.City, stoppingToken);
+                        if (coordinates is null)
                         {
-                            await Task.Delay(2000, stoppingToken);
-                        }
-                        catch (OperationCanceledException)
-                        {
+                            _logger.LogWarning("Cidade '{City}' não encontrada na Geocoding API. Marcando WeatherCheck {WeatherCheckId} como falho.", weatherCheck.City, weatherCheck.Id);
+                            
+                            weatherCheck.Status = WeatherCheckStatuses.Failed;
+                            weatherCheck.ErrorMessage = "Location not found.";
+                            
+                            await dbContext.SaveChangesAsync(stoppingToken);
+
+                            await _channel.BasicAckAsync(deliveryTag: ea.DeliveryTag, multiple: false);
                             return;
                         }
 
-                        try
+                        // Consultar clima atual
+                        var (weather, weatherJson) = await openMeteoClient.GetCurrentWeatherAsync(coordinates.Latitude, coordinates.Longitude, stoppingToken);
+
+                        // Criar e salvar snapshot
+                        var snapshot = new WeatherSnapshot
                         {
-                            await _channel.BasicNackAsync(deliveryTag: ea.DeliveryTag, multiple: false, requeue: true);
-                        }
-                        catch (Exception nackEx)
-                        {
-                            _logger.LogError(nackEx, "Erro ao enviar NACK com requeue para {WeatherCheckId}", message.WeatherCheckId);
-                        }
+                            Id = Guid.NewGuid(),
+                            WeatherCheckId = weatherCheck.Id,
+                            LocationName = coordinates.Name,
+                            CountryCode = coordinates.CountryCode ?? string.Empty,
+                            Latitude = coordinates.Latitude,
+                            Longitude = coordinates.Longitude,
+                            Timezone = coordinates.Timezone ?? string.Empty,
+                            TemperatureC = weather.TemperatureC,
+                            ApparentTemperatureC = weather.ApparentTemperatureC,
+                            PrecipitationMm = weather.PrecipitationMm,
+                            WindSpeedKmh = weather.WindSpeedKmh,
+                            WeatherCode = weather.WeatherCode,
+                            ObservedAtUtc = weather.ObservedAtUtc,
+                            RawPayloadJson = weatherJson
+                        };
+
+                        dbContext.WeatherSnapshots.Add(snapshot);
+
+                        // Só atualizar para processed após salvar o snapshot
+                        weatherCheck.Status = WeatherCheckStatuses.Processed;
+                        weatherCheck.ProcessedAtUtc = DateTimeOffset.UtcNow;
+
+                        await dbContext.SaveChangesAsync(stoppingToken);
+
+                        _logger.LogInformation("Mensagem processada com sucesso e snapshot salvo. WeatherCheckId: {WeatherCheckId}, Cidade: {City}, Temp: {Temp}C",
+                            weatherCheck.Id,
+                            weatherCheck.City,
+                            weather.TemperatureC);
+
+                        await _channel.BasicAckAsync(deliveryTag: ea.DeliveryTag, multiple: false);
+                    }
+                    catch (HttpRequestException ex)
+                    {
+                        _logger.LogError(ex, "Erro de rede/transiente ao consultar Open-Meteo para a cidade '{City}'. Enviando NACK (requeue: true).", weatherCheck.City);
+                        await HandleTransientErrorAsync(ea.DeliveryTag, stoppingToken);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Erro ao processar WeatherCheck {WeatherCheckId} na cidade '{City}'. Enviando NACK (requeue: true).", weatherCheck.Id, weatherCheck.City);
+                        await HandleTransientErrorAsync(ea.DeliveryTag, stoppingToken);
                     }
                     return;
                 }
@@ -353,5 +366,27 @@ public sealed class QueueConsumerWorker : BackgroundService
         }
 
         await base.StopAsync(cancellationToken);
+    }
+
+    private async Task HandleTransientErrorAsync(ulong deliveryTag, CancellationToken ct)
+    {
+        if (_channel is null) return;
+        try
+        {
+            await Task.Delay(2000, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        try
+        {
+            await _channel.BasicNackAsync(deliveryTag: deliveryTag, multiple: false, requeue: true);
+        }
+        catch (Exception nackEx)
+        {
+            _logger.LogError(nackEx, "Erro ao enviar NACK com requeue para deliveryTag {DeliveryTag}", deliveryTag);
+        }
     }
 }
