@@ -1,0 +1,26 @@
+## Ignore Visual Studio temporary files, build results, and user properties
+[Oo]bj/
+[Bb]in/
+*.user
+*.userosscache
+*.sln.docstates
+
+## Ignore VS Code
+.vscode/
+
+## Ignore Rider
+.idea/
+
+## Ignore Docker
+.dockerignore
+
+## Ignore environment files and test responses
+.env
+response.json
+response2.json
+payload.json
+
+## Ignore OS files
+Thumbs.db
+Desktop.ini
+.DS_Store

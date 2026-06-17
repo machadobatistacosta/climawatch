@@ -1,0 +1,160 @@
+using ClimaWatch.Api;
+using ClimaWatch.Contracts;
+using ClimaWatch.Infrastructure;
+using Microsoft.EntityFrameworkCore;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Validar Connection String
+var connectionString = builder.Configuration.GetConnectionString("ClimaWatch")
+    ?? throw new InvalidOperationException("Connection string 'ClimaWatch' is not configured.");
+
+// Registrar DbContext
+builder.Services.AddDbContext<ClimaWatchDbContext>(options =>
+    options.UseNpgsql(connectionString));
+
+builder.Services.AddHealthChecks();
+builder.Services.AddSingleton<RabbitMqPublisher>();
+
+var app = builder.Build();
+
+// Aplicação automática de migrações no startup local
+using (var scope = app.Services.CreateScope())
+{
+    var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+    var context = scope.ServiceProvider.GetRequiredService<ClimaWatchDbContext>();
+    
+    try
+    {
+        logger.LogInformation("Aplicando migrações do EF Core no startup da API...");
+        await context.Database.MigrateAsync();
+        logger.LogInformation("Migrações aplicadas com sucesso.");
+    }
+    catch (Exception ex)
+    {
+        logger.LogCritical(ex, "Falha crítica ao aplicar migrações do banco de dados.");
+        throw;
+    }
+}
+
+app.MapGet("/", () => Results.Ok(new
+{
+    service = "ClimaWatch.Api",
+    status = "running"
+}));
+
+app.MapHealthChecks("/health");
+
+app.MapPost("/api/weather-checks", async (
+    WeatherCheckRequest request,
+    ClimaWatchDbContext dbContext,
+    RabbitMqPublisher publisher,
+    ILogger<Program> logger,
+    CancellationToken cancellationToken) =>
+{
+    if (request == null || string.IsNullOrWhiteSpace(request.City))
+    {
+        return Results.BadRequest(new { error = "A cidade é obrigatória." });
+    }
+
+    var city = request.City.Trim();
+    if (city.Length > 120)
+    {
+        return Results.BadRequest(new { error = "O nome da cidade deve ter no máximo 120 caracteres." });
+    }
+
+    var weatherCheckId = Guid.NewGuid();
+    var eventId = Guid.NewGuid();
+    var correlationId = Guid.NewGuid();
+    var requestedAtUtc = DateTimeOffset.UtcNow;
+
+    var weatherCheck = new WeatherCheck
+    {
+        Id = weatherCheckId,
+        EventId = eventId,
+        CorrelationId = correlationId,
+        City = city,
+        Status = WeatherCheckStatuses.Queued,
+        RequestedAtUtc = requestedAtUtc
+    };
+
+    try
+    {
+        dbContext.WeatherChecks.Add(weatherCheck);
+        await dbContext.SaveChangesAsync(cancellationToken);
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Erro ao salvar a solicitação WeatherCheck no banco de dados.");
+        return Results.Json(new { error = "Erro interno ao persistir solicitação." }, statusCode: 500);
+    }
+
+    var eventMessage = new WeatherCheckRequested(
+        weatherCheckId,
+        eventId,
+        correlationId,
+        city,
+        requestedAtUtc);
+
+    try
+    {
+        await publisher.PublishAsync(eventMessage, cancellationToken);
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Erro ao publicar evento no RabbitMQ. Atualizando WeatherCheck para falho.");
+        
+        try
+        {
+            weatherCheck.Status = WeatherCheckStatuses.Failed;
+            weatherCheck.ErrorMessage = "RabbitMQ publication failed.";
+            await dbContext.SaveChangesAsync(CancellationToken.None);
+        }
+        catch (Exception dbEx)
+        {
+            logger.LogError(dbEx, "Erro ao atualizar status do WeatherCheck para Failed no banco de dados.");
+        }
+
+        return Results.Json(new { error = "Serviço de mensageria temporariamente indisponível." }, statusCode: 503);
+    }
+
+    return Results.Accepted($"/api/weather-checks/{weatherCheckId}", new
+    {
+        status = WeatherCheckStatuses.Queued,
+        weatherCheckId,
+        eventId,
+        correlationId,
+        city
+    });
+});
+
+app.MapGet("/api/weather-checks/{id:guid}", async (
+    Guid id,
+    ClimaWatchDbContext dbContext,
+    CancellationToken cancellationToken) =>
+{
+    var weatherCheck = await dbContext.WeatherChecks
+        .AsNoTracking()
+        .FirstOrDefaultAsync(w => w.Id == id, cancellationToken);
+
+    if (weatherCheck == null)
+    {
+        return Results.NotFound();
+    }
+
+    return Results.Ok(new
+    {
+        weatherCheckId = weatherCheck.Id,
+        eventId = weatherCheck.EventId,
+        correlationId = weatherCheck.CorrelationId,
+        city = weatherCheck.City,
+        status = weatherCheck.Status,
+        requestedAtUtc = weatherCheck.RequestedAtUtc,
+        processedAtUtc = weatherCheck.ProcessedAtUtc,
+        errorMessage = weatherCheck.ErrorMessage
+    });
+});
+
+app.Run();
+
+public record WeatherCheckRequest(string? City);
