@@ -69,3 +69,67 @@ Ao adicionar um novo servidor PostgreSQL na interface web do pgAdmin (`http://lo
    > Use `postgres` e **não** `localhost`. Como o pgAdmin está rodando dentro da mesma rede Docker (`climawatch-network`), o Host name é resolvido pelo nome do serviço definido no `compose.yaml`.
 
 3. Use as credenciais definidas no arquivo `.env` (exemplo: usuário `climawatch`, senha `climawatch_dev_password`, banco `climawatch`).
+
+---
+
+## Dead Letter Queue (DLQ)
+
+Para capturar e isolar mensagens que falham definitivamente no processamento (ex.: JSON inválido, contratos inconsistentes), a topologia local utiliza uma DLQ (Dead Letter Queue):
+
+* **Exchange DLX**: `climawatch.dead-letter` (tipo `direct`)
+* **Fila DLQ**: `climawatch.dead-letter` (vinculada à key `dead-letter`)
+
+As filas principais (`climawatch.weather-checks` e `climawatch.alerts`) são configuradas com:
+* `x-dead-letter-exchange`: `climawatch.dead-letter`
+* `x-dead-letter-routing-key`: `dead-letter`
+
+Quando um worker rejeita uma mensagem enviando `NACK (requeue: false)` por erro irrecuperável, o RabbitMQ redireciona automaticamente a mensagem para a DLQ.
+
+### Testando a DLQ Localmente
+
+Você pode forçar o envio de mensagens para a DLQ publicando payloads inválidos via RabbitMQ HTTP API (Management Plugin):
+
+1. **Testar DLQ com Fila de Weather Checks (`weather.check.requested`)**:
+   ```powershell
+   $creds = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("climawatch:climawatch_dev_password"))
+   $body = @{
+       properties  = @{ delivery_mode = 2 }
+       routing_key = "weather.check.requested"
+       payload     = "invalid json weather checks"
+       payload_encoding = "string"
+   } | ConvertTo-Json
+
+   Invoke-RestMethod -Method Post `
+     -Uri "http://localhost:15672/api/exchanges/%2F/climawatch.events/publish" `
+     -Headers @{ Authorization = "Basic $creds"; "Content-Type" = "application/json" } `
+     -Body $body
+   ```
+
+2. **Testar DLQ com Fila de Alertas (`alert.detected`)**:
+   ```powershell
+   $creds = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("climawatch:climawatch_dev_password"))
+   $body = @{
+       properties  = @{ delivery_mode = 2 }
+       routing_key = "alert.detected"
+       payload     = "invalid json alerts"
+       payload_encoding = "string"
+   } | ConvertTo-Json
+
+   Invoke-RestMethod -Method Post `
+     -Uri "http://localhost:15672/api/exchanges/%2F/climawatch.events/publish" `
+     -Headers @{ Authorization = "Basic $creds"; "Content-Type" = "application/json" } `
+     -Body $body
+   ```
+
+3. **Verificar Filas**:
+   Execute o comando abaixo para verificar se as mensagens foram movidas para a DLQ:
+   ```powershell
+   docker compose exec rabbitmq rabbitmqctl list_queues name messages_ready consumers
+   ```
+   Resultado esperado após rodar ambos os testes:
+   ```txt
+   climawatch.dead-letter      2   0
+   climawatch.weather-checks   0   1
+   climawatch.alerts           0   1
+   ```
+

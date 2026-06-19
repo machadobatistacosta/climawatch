@@ -89,12 +89,44 @@ public sealed class NotificationConsumerWorker : BackgroundService
                 arguments: null,
                 cancellationToken: stoppingToken);
 
+            // Declarar DLX (Dead Letter Exchange)
+            await _channel.ExchangeDeclareAsync(
+                exchange: MessagingTopology.DeadLetterExchangeName,
+                type: "direct",
+                durable: true,
+                autoDelete: false,
+                arguments: null,
+                cancellationToken: stoppingToken);
+
+            // Declarar DLQ (Dead Letter Queue)
+            await _channel.QueueDeclareAsync(
+                queue: MessagingTopology.DeadLetterQueueName,
+                durable: true,
+                exclusive: false,
+                autoDelete: false,
+                arguments: null,
+                cancellationToken: stoppingToken);
+
+            // Vincular DLQ ao DLX
+            await _channel.QueueBindAsync(
+                queue: MessagingTopology.DeadLetterQueueName,
+                exchange: MessagingTopology.DeadLetterExchangeName,
+                routingKey: MessagingTopology.DeadLetterRoutingKey,
+                arguments: null,
+                cancellationToken: stoppingToken);
+
+            var alertsArgs = new Dictionary<string, object?>
+            {
+                { "x-dead-letter-exchange", MessagingTopology.DeadLetterExchangeName },
+                { "x-dead-letter-routing-key", MessagingTopology.DeadLetterRoutingKey }
+            };
+
             await _channel.QueueDeclareAsync(
                 queue: MessagingTopology.AlertsQueueName,
                 durable: true,
                 exclusive: false,
                 autoDelete: false,
-                arguments: null,
+                arguments: alertsArgs,
                 cancellationToken: stoppingToken);
 
             await _channel.QueueBindAsync(

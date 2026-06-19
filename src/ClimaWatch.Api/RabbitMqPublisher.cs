@@ -77,12 +77,44 @@ public sealed class RabbitMqPublisher : IAsyncDisposable
                 arguments: null,
                 cancellationToken: cancellationToken);
 
+            // Declarar DLX (Dead Letter Exchange)
+            await _channel.ExchangeDeclareAsync(
+                exchange: MessagingTopology.DeadLetterExchangeName,
+                type: "direct",
+                durable: true,
+                autoDelete: false,
+                arguments: null,
+                cancellationToken: cancellationToken);
+
+            // Declarar DLQ (Dead Letter Queue)
+            await _channel.QueueDeclareAsync(
+                queue: MessagingTopology.DeadLetterQueueName,
+                durable: true,
+                exclusive: false,
+                autoDelete: false,
+                arguments: null,
+                cancellationToken: cancellationToken);
+
+            // Vincular DLQ ao DLX
+            await _channel.QueueBindAsync(
+                queue: MessagingTopology.DeadLetterQueueName,
+                exchange: MessagingTopology.DeadLetterExchangeName,
+                routingKey: MessagingTopology.DeadLetterRoutingKey,
+                arguments: null,
+                cancellationToken: cancellationToken);
+
+            var weatherChecksArgs = new Dictionary<string, object?>
+            {
+                { "x-dead-letter-exchange", MessagingTopology.DeadLetterExchangeName },
+                { "x-dead-letter-routing-key", MessagingTopology.DeadLetterRoutingKey }
+            };
+
             await _channel.QueueDeclareAsync(
                 queue: MessagingTopology.WeatherChecksQueueName,
                 durable: true,
                 exclusive: false,
                 autoDelete: false,
-                arguments: null,
+                arguments: weatherChecksArgs,
                 cancellationToken: cancellationToken);
 
             await _channel.QueueBindAsync(
