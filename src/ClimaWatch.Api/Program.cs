@@ -187,6 +187,49 @@ app.MapGet("/api/weather-checks/{id:guid}/snapshot", async (
     });
 });
 
+app.MapGet("/api/weather-checks/{id:guid}/alerts", async (
+    Guid id,
+    ClimaWatchDbContext dbContext,
+    CancellationToken cancellationToken) =>
+{
+    var alerts = await dbContext.WeatherAlerts
+        .AsNoTracking()
+        .Where(a => a.WeatherCheckId == id)
+        .OrderBy(a => a.DetectedAtUtc)
+        .Select(a => new
+        {
+            id = a.Id,
+            alertType = a.AlertType,
+            severity = a.Severity,
+            message = a.Message,
+            detectedAtUtc = a.DetectedAtUtc
+        })
+        .ToListAsync(cancellationToken);
+
+    return Results.Ok(alerts);
+});
+
+app.MapGet("/api/notifications", async (
+    ClimaWatchDbContext dbContext,
+    CancellationToken cancellationToken) =>
+{
+    var notifications = await dbContext.Notifications
+        .AsNoTracking()
+        .OrderByDescending(n => n.CreatedAtUtc)
+        .Take(50)
+        .Select(n => new
+        {
+            id = n.Id,
+            weatherAlertId = n.WeatherAlertId,
+            channel = n.Channel,
+            status = n.Status,
+            createdAtUtc = n.CreatedAtUtc
+        })
+        .ToListAsync(cancellationToken);
+
+    return Results.Ok(notifications);
+});
+
 app.Run();
 
 public record WeatherCheckRequest(string? City);

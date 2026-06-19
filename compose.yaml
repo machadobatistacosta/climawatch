@@ -98,6 +98,26 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  notification-worker:
+    build:
+      context: .
+      dockerfile: src/ClimaWatch.NotificationWorker/Dockerfile
+    container_name: climawatch-notification-worker
+    environment:
+      RabbitMq__HostName: rabbitmq
+      RabbitMq__Port: 5672
+      RabbitMq__UserName: ${RABBITMQ_DEFAULT_USER}
+      RabbitMq__Password: ${RABBITMQ_DEFAULT_PASS}
+      ConnectionStrings__ClimaWatch: Host=postgres;Port=5432;Database=${POSTGRES_DB};Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD}
+    networks:
+      - climawatch-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
 networks:
   climawatch-network:
     driver: bridge

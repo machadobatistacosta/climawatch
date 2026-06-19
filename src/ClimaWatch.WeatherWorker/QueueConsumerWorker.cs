@@ -1,9 +1,11 @@
 using System;
+using System.Collections.Generic;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -20,8 +22,15 @@ public sealed class QueueConsumerWorker : BackgroundService
     private readonly IConfiguration _configuration;
     private readonly ILogger<QueueConsumerWorker> _logger;
     private readonly IServiceScopeFactory _scopeFactory;
+
     private IConnection? _connection;
+
+    // Canal exclusivo para consumo de weather-checks
     private IChannel? _channel;
+
+    // Canal separado para publicação de alertas, protegido por semáforo
+    private IChannel? _publishChannel;
+    private readonly SemaphoreSlim _publishSemaphore = new(1, 1);
 
     public QueueConsumerWorker(IConfiguration configuration, ILogger<QueueConsumerWorker> logger, IServiceScopeFactory scopeFactory)
     {
@@ -53,7 +62,7 @@ public sealed class QueueConsumerWorker : BackgroundService
             ClientProvidedName = "climawatch-weather-worker"
         };
 
-        // Retry loop for initial connection
+        // Retry loop para conexão inicial
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -72,7 +81,6 @@ public sealed class QueueConsumerWorker : BackgroundService
                 }
                 catch (OperationCanceledException)
                 {
-                    // Graceful shutdown requested during delay
                     return;
                 }
             }
@@ -85,10 +93,14 @@ public sealed class QueueConsumerWorker : BackgroundService
 
         try
         {
+            // Canal de consumo
             _channel = await _connection.CreateChannelAsync(cancellationToken: stoppingToken);
 
+            // Canal de publicação (separado)
+            _publishChannel = await _connection.CreateChannelAsync(cancellationToken: stoppingToken);
+
             _logger.LogInformation("Declarando topologia RabbitMQ (Worker)...");
-            
+
             await _channel.ExchangeDeclareAsync(
                 exchange: MessagingTopology.ExchangeName,
                 type: "topic",
@@ -97,6 +109,7 @@ public sealed class QueueConsumerWorker : BackgroundService
                 arguments: null,
                 cancellationToken: stoppingToken);
 
+            // Fila de weather-checks (consumo)
             await _channel.QueueDeclareAsync(
                 queue: MessagingTopology.WeatherChecksQueueName,
                 durable: true,
@@ -109,6 +122,22 @@ public sealed class QueueConsumerWorker : BackgroundService
                 queue: MessagingTopology.WeatherChecksQueueName,
                 exchange: MessagingTopology.ExchangeName,
                 routingKey: MessagingTopology.WeatherCheckRequestedRoutingKey,
+                arguments: null,
+                cancellationToken: stoppingToken);
+
+            // Fila de alertas (declarada idempotentemente para que o NotificationWorker encontre)
+            await _channel.QueueDeclareAsync(
+                queue: MessagingTopology.AlertsQueueName,
+                durable: true,
+                exclusive: false,
+                autoDelete: false,
+                arguments: null,
+                cancellationToken: stoppingToken);
+
+            await _channel.QueueBindAsync(
+                queue: MessagingTopology.AlertsQueueName,
+                exchange: MessagingTopology.ExchangeName,
+                routingKey: MessagingTopology.AlertDetectedRoutingKey,
                 arguments: null,
                 cancellationToken: stoppingToken);
 
@@ -154,22 +183,14 @@ public sealed class QueueConsumerWorker : BackgroundService
                     return;
                 }
 
-                // 1. Se WeatherCheckId == Guid.Empty
                 if (message.WeatherCheckId == Guid.Empty)
                 {
-                    _logger.LogWarning("Evento recebido com WeatherCheckId vazio ou ausente. EventId: {EventId}. Enviando ACK.", message.EventId);
-                    try
-                    {
-                        await _channel.BasicAckAsync(deliveryTag: ea.DeliveryTag, multiple: false);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Erro ao enviar ACK para a mensagem {EventId}", message.EventId);
-                    }
+                    _logger.LogWarning("Evento recebido com WeatherCheckId vazio. EventId: {EventId}. Enviando ACK.", message.EventId);
+                    try { await _channel.BasicAckAsync(deliveryTag: ea.DeliveryTag, multiple: false); }
+                    catch (Exception ex) { _logger.LogError(ex, "Erro ao enviar ACK para {EventId}", message.EventId); }
                     return;
                 }
 
-                // Processar banco de dados
                 using var scope = _scopeFactory.CreateScope();
                 var dbContext = scope.ServiceProvider.GetRequiredService<ClimaWatchDbContext>();
 
@@ -180,82 +201,57 @@ public sealed class QueueConsumerWorker : BackgroundService
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Erro temporário ao acessar o banco de dados para buscar WeatherCheck {WeatherCheckId}. Enviando NACK (requeue: true).", message.WeatherCheckId);
+                    _logger.LogError(ex, "Erro ao acessar o banco para buscar WeatherCheck {WeatherCheckId}. Enviando NACK (requeue: true).", message.WeatherCheckId);
                     await HandleTransientErrorAsync(ea.DeliveryTag, stoppingToken);
                     return;
                 }
 
-                // 2. Se o registro não existir
                 if (weatherCheck is null)
                 {
-                    _logger.LogWarning("WeatherCheck {WeatherCheckId} não foi encontrado no banco de dados. Enviando ACK.", message.WeatherCheckId);
-                    try
-                    {
-                        await _channel.BasicAckAsync(deliveryTag: ea.DeliveryTag, multiple: false);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Erro ao enviar ACK para a mensagem {EventId}", message.EventId);
-                    }
+                    _logger.LogWarning("WeatherCheck {WeatherCheckId} não encontrado. Enviando ACK.", message.WeatherCheckId);
+                    try { await _channel.BasicAckAsync(deliveryTag: ea.DeliveryTag, multiple: false); }
+                    catch (Exception ex) { _logger.LogError(ex, "Erro ao enviar ACK para {EventId}", message.EventId); }
                     return;
                 }
 
-                // 3. Se Status == WeatherCheckStatuses.Processed
                 if (weatherCheck.Status == WeatherCheckStatuses.Processed)
                 {
-                    _logger.LogInformation("Mensagem duplicada recebida para WeatherCheck {WeatherCheckId} (já está processed). Enviando ACK sem reprocessar.", message.WeatherCheckId);
-                    try
-                    {
-                        await _channel.BasicAckAsync(deliveryTag: ea.DeliveryTag, multiple: false);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Erro ao enviar ACK para a mensagem {EventId}", message.EventId);
-                    }
+                    _logger.LogInformation("WeatherCheck {WeatherCheckId} já está processed. Enviando ACK sem reprocessar.", message.WeatherCheckId);
+                    try { await _channel.BasicAckAsync(deliveryTag: ea.DeliveryTag, multiple: false); }
+                    catch (Exception ex) { _logger.LogError(ex, "Erro ao enviar ACK para {EventId}", message.EventId); }
                     return;
                 }
 
-                // 4. Se Status == WeatherCheckStatuses.Failed
                 if (weatherCheck.Status == WeatherCheckStatuses.Failed)
                 {
-                    _logger.LogWarning("Mensagem recebida para WeatherCheck {WeatherCheckId} que está em estado Failed. Enviando ACK sem alterar o registro.", message.WeatherCheckId);
-                    try
-                    {
-                        await _channel.BasicAckAsync(deliveryTag: ea.DeliveryTag, multiple: false);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Erro ao enviar ACK para a mensagem {EventId}", message.EventId);
-                    }
+                    _logger.LogWarning("WeatherCheck {WeatherCheckId} está em estado Failed. Enviando ACK.", message.WeatherCheckId);
+                    try { await _channel.BasicAckAsync(deliveryTag: ea.DeliveryTag, multiple: false); }
+                    catch (Exception ex) { _logger.LogError(ex, "Erro ao enviar ACK para {EventId}", message.EventId); }
                     return;
                 }
 
-                // 5. Somente se Status == WeatherCheckStatuses.Queued
                 if (weatherCheck.Status == WeatherCheckStatuses.Queued)
                 {
                     try
                     {
                         var openMeteoClient = scope.ServiceProvider.GetRequiredService<OpenMeteoClient>();
 
-                        // Consultar coordenadas
+                        // 1. Geocoding
                         var coordinates = await openMeteoClient.GetCoordinatesAsync(weatherCheck.City, stoppingToken);
                         if (coordinates is null)
                         {
-                            _logger.LogWarning("Cidade '{City}' não encontrada na Geocoding API. Marcando WeatherCheck {WeatherCheckId} como falho.", weatherCheck.City, weatherCheck.Id);
-                            
+                            _logger.LogWarning("Cidade '{City}' não encontrada. Marcando WeatherCheck {WeatherCheckId} como failed.", weatherCheck.City, weatherCheck.Id);
                             weatherCheck.Status = WeatherCheckStatuses.Failed;
                             weatherCheck.ErrorMessage = "Location not found.";
-                            
                             await dbContext.SaveChangesAsync(stoppingToken);
-
                             await _channel.BasicAckAsync(deliveryTag: ea.DeliveryTag, multiple: false);
                             return;
                         }
 
-                        // Consultar clima atual
+                        // 2. Forecast
                         var (weather, weatherJson) = await openMeteoClient.GetCurrentWeatherAsync(coordinates.Latitude, coordinates.Longitude, stoppingToken);
 
-                        // Criar e salvar snapshot
+                        // 3. Salvar snapshot
                         var snapshot = new WeatherSnapshot
                         {
                             Id = Guid.NewGuid(),
@@ -276,42 +272,64 @@ public sealed class QueueConsumerWorker : BackgroundService
 
                         dbContext.WeatherSnapshots.Add(snapshot);
 
-                        // Só atualizar para processed após salvar o snapshot
                         weatherCheck.Status = WeatherCheckStatuses.Processed;
                         weatherCheck.ProcessedAtUtc = DateTimeOffset.UtcNow;
 
                         await dbContext.SaveChangesAsync(stoppingToken);
 
-                        _logger.LogInformation("Mensagem processada com sucesso e snapshot salvo. WeatherCheckId: {WeatherCheckId}, Cidade: {City}, Temp: {Temp}C",
-                            weatherCheck.Id,
-                            weatherCheck.City,
-                            weather.TemperatureC);
+                        _logger.LogInformation(
+                            "Snapshot salvo. WeatherCheckId: {WeatherCheckId}, Cidade: {City}, Temp: {Temp}C, Chuva: {Rain}mm, Vento: {Wind}km/h",
+                            weatherCheck.Id, weatherCheck.City, weather.TemperatureC, weather.PrecipitationMm, weather.WindSpeedKmh);
 
+                        // 4. Avaliar regras de alerta e publicar
+                        var alerts = EvaluateAlertRules(weather, weatherCheck, snapshot);
+                        foreach (var alert in alerts)
+                        {
+                            dbContext.WeatherAlerts.Add(alert);
+                            await dbContext.SaveChangesAsync(stoppingToken);
+
+                            _logger.LogInformation(
+                                "Alerta detectado: {AlertType} ({Severity}) para WeatherCheckId {WeatherCheckId}.",
+                                alert.AlertType, alert.Severity, weatherCheck.Id);
+
+                            var alertEvent = new AlertDetected(
+                                EventId: alert.EventId,
+                                CorrelationId: alert.CorrelationId,
+                                WeatherAlertId: alert.Id,
+                                WeatherCheckId: alert.WeatherCheckId,
+                                WeatherSnapshotId: alert.WeatherSnapshotId,
+                                AlertType: alert.AlertType,
+                                Severity: alert.Severity,
+                                Message: alert.Message,
+                                DetectedAtUtc: alert.DetectedAtUtc);
+
+                            await PublishAlertAsync(alertEvent, stoppingToken);
+                        }
+
+                        if (alerts.Count == 0)
+                        {
+                            _logger.LogInformation("Nenhuma regra de alerta atingida para WeatherCheckId {WeatherCheckId}.", weatherCheck.Id);
+                        }
+
+                        // 5. ACK somente após tudo salvo e publicado
                         await _channel.BasicAckAsync(deliveryTag: ea.DeliveryTag, multiple: false);
                     }
                     catch (HttpRequestException ex)
                     {
-                        _logger.LogError(ex, "Erro de rede/transiente ao consultar Open-Meteo para a cidade '{City}'. Enviando NACK (requeue: true).", weatherCheck.City);
+                        _logger.LogError(ex, "Erro de rede ao consultar Open-Meteo para '{City}'. Enviando NACK (requeue: true).", weatherCheck.City);
                         await HandleTransientErrorAsync(ea.DeliveryTag, stoppingToken);
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError(ex, "Erro ao processar WeatherCheck {WeatherCheckId} na cidade '{City}'. Enviando NACK (requeue: true).", weatherCheck.Id, weatherCheck.City);
+                        _logger.LogError(ex, "Erro ao processar WeatherCheck {WeatherCheckId}. Enviando NACK (requeue: true).", weatherCheck.Id);
                         await HandleTransientErrorAsync(ea.DeliveryTag, stoppingToken);
                     }
                     return;
                 }
 
-                // 6. Para status inesperado
-                _logger.LogWarning("WeatherCheck {WeatherCheckId} possui status inesperado '{Status}'. Enviando ACK sem alterar o registro.", message.WeatherCheckId, weatherCheck.Status);
-                try
-                {
-                    await _channel.BasicAckAsync(deliveryTag: ea.DeliveryTag, multiple: false);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Erro ao enviar ACK para a mensagem {EventId}", message.EventId);
-                }
+                _logger.LogWarning("Status inesperado '{Status}' para WeatherCheck {WeatherCheckId}. Enviando ACK.", weatherCheck.Status, message.WeatherCheckId);
+                try { await _channel.BasicAckAsync(deliveryTag: ea.DeliveryTag, multiple: false); }
+                catch (Exception ex) { _logger.LogError(ex, "Erro ao enviar ACK para {EventId}", message.EventId); }
             };
 
             await _channel.BasicConsumeAsync(
@@ -322,7 +340,6 @@ public sealed class QueueConsumerWorker : BackgroundService
 
             _logger.LogInformation("Worker iniciado e consumindo da fila {QueueName}...", MessagingTopology.WeatherChecksQueueName);
 
-            // Keep the service alive until cancellation is requested
             await Task.Delay(Timeout.Infinite, stoppingToken);
         }
         catch (OperationCanceledException)
@@ -335,50 +352,144 @@ public sealed class QueueConsumerWorker : BackgroundService
         }
     }
 
+    // ─── Regras de Alerta ───────────────────────────────────────────────────
+
+    private static List<WeatherAlert> EvaluateAlertRules(
+        ForecastResult weather,
+        WeatherCheck weatherCheck,
+        WeatherSnapshot snapshot)
+    {
+        var alerts = new List<WeatherAlert>();
+        var now = DateTimeOffset.UtcNow;
+
+        // Regra 1: Vento forte (critical)
+        if (weather.WindSpeedKmh >= 40)
+        {
+            alerts.Add(new WeatherAlert
+            {
+                Id = Guid.NewGuid(),
+                EventId = Guid.NewGuid(),
+                CorrelationId = weatherCheck.CorrelationId,
+                WeatherCheckId = weatherCheck.Id,
+                WeatherSnapshotId = snapshot.Id,
+                AlertType = "strong_wind",
+                Severity = "critical",
+                Message = $"Vento forte detectado em {snapshot.LocationName}: {weather.WindSpeedKmh} km/h.",
+                DetectedAtUtc = now
+            });
+        }
+
+        // Regra 2: Temperatura alta (warning)
+        if (weather.TemperatureC >= 30)
+        {
+            alerts.Add(new WeatherAlert
+            {
+                Id = Guid.NewGuid(),
+                EventId = Guid.NewGuid(),
+                CorrelationId = weatherCheck.CorrelationId,
+                WeatherCheckId = weatherCheck.Id,
+                WeatherSnapshotId = snapshot.Id,
+                AlertType = "high_temperature",
+                Severity = "warning",
+                Message = $"Temperatura alta detectada em {snapshot.LocationName}: {weather.TemperatureC}°C.",
+                DetectedAtUtc = now
+            });
+        }
+
+        // Regra 3: Chuva (info)
+        if (weather.PrecipitationMm > 0)
+        {
+            alerts.Add(new WeatherAlert
+            {
+                Id = Guid.NewGuid(),
+                EventId = Guid.NewGuid(),
+                CorrelationId = weatherCheck.CorrelationId,
+                WeatherCheckId = weatherCheck.Id,
+                WeatherSnapshotId = snapshot.Id,
+                AlertType = "precipitation",
+                Severity = "info",
+                Message = $"Precipitação detectada em {snapshot.LocationName}: {weather.PrecipitationMm} mm.",
+                DetectedAtUtc = now
+            });
+        }
+
+        return alerts;
+    }
+
+    // ─── Publicação de Alertas (canal separado + SemaphoreSlim) ─────────────
+
+    private async Task PublishAlertAsync(AlertDetected alertEvent, CancellationToken ct)
+    {
+        if (_publishChannel is null) return;
+
+        await _publishSemaphore.WaitAsync(ct);
+        try
+        {
+            var json = JsonSerializer.Serialize(alertEvent);
+            var body = Encoding.UTF8.GetBytes(json);
+
+            var properties = new BasicProperties
+            {
+                Persistent = true,
+                ContentType = "application/json",
+                MessageId = alertEvent.EventId.ToString(),
+                CorrelationId = alertEvent.CorrelationId.ToString(),
+                Type = nameof(AlertDetected)
+            };
+
+            await _publishChannel.BasicPublishAsync(
+                exchange: MessagingTopology.ExchangeName,
+                routingKey: MessagingTopology.AlertDetectedRoutingKey,
+                mandatory: false,
+                basicProperties: properties,
+                body: body,
+                cancellationToken: ct);
+
+            _logger.LogInformation(
+                "Evento AlertDetected publicado. AlertType: {AlertType}, WeatherAlertId: {WeatherAlertId}.",
+                alertEvent.AlertType, alertEvent.WeatherAlertId);
+        }
+        finally
+        {
+            _publishSemaphore.Release();
+        }
+    }
+
+    // ─── StopAsync ──────────────────────────────────────────────────────────
+
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
         _logger.LogInformation("Finalizando o worker...");
 
+        if (_publishChannel is not null)
+        {
+            try { await _publishChannel.CloseAsync(cancellationToken); _publishChannel.Dispose(); }
+            catch (Exception ex) { _logger.LogWarning(ex, "Erro ao fechar o canal de publicação."); }
+        }
+
         if (_channel is not null)
         {
-            try
-            {
-                await _channel.CloseAsync(cancellationToken);
-                _channel.Dispose();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Erro ao fechar o canal do RabbitMQ no encerramento.");
-            }
+            try { await _channel.CloseAsync(cancellationToken); _channel.Dispose(); }
+            catch (Exception ex) { _logger.LogWarning(ex, "Erro ao fechar o canal do RabbitMQ no encerramento."); }
         }
 
         if (_connection is not null)
         {
-            try
-            {
-                await _connection.CloseAsync(cancellationToken);
-                _connection.Dispose();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Erro ao fechar a conexão do RabbitMQ no encerramento.");
-            }
+            try { await _connection.CloseAsync(cancellationToken); _connection.Dispose(); }
+            catch (Exception ex) { _logger.LogWarning(ex, "Erro ao fechar a conexão do RabbitMQ no encerramento."); }
         }
 
+        _publishSemaphore.Dispose();
         await base.StopAsync(cancellationToken);
     }
+
+    // ─── Helpers ────────────────────────────────────────────────────────────
 
     private async Task HandleTransientErrorAsync(ulong deliveryTag, CancellationToken ct)
     {
         if (_channel is null) return;
-        try
-        {
-            await Task.Delay(2000, ct);
-        }
-        catch (OperationCanceledException)
-        {
-            return;
-        }
+        try { await Task.Delay(2000, ct); }
+        catch (OperationCanceledException) { return; }
 
         try
         {
