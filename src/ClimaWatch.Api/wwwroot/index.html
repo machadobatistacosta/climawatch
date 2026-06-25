@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="ClimaWatch — Sistema distribuído de monitoramento climático em tempo real." />
+  <title>ClimaWatch — Monitoramento Climático</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="header-inner">
+      <div class="logo">
+        <span class="logo-icon">🌤</span>
+        <div>
+          <h1>ClimaWatch</h1>
+          <p class="subtitle">Monitoramento Climático Distribuído</p>
+        </div>
+      </div>
+      <span id="status-badge" class="badge badge-idle">Sistema pronto</span>
+    </div>
+  </header>
+
+  <main class="container">
+
+    <!-- Card: Consulta -->
+    <section class="card" id="card-query">
+      <h2 class="card-title">🔍 Consultar Clima</h2>
+      <div class="search-row">
+        <input
+          type="text"
+          id="city-input"
+          class="city-input"
+          placeholder="Digite o nome de uma cidade... (ex: Manaus)"
+          autocomplete="off"
+          maxlength="120"
+        />
+        <button id="btn-query" class="btn btn-primary">Consultar Clima</button>
+      </div>
+      <p id="input-error" class="input-error hidden"></p>
+    </section>
+
+    <!-- Card: Status da Requisição -->
+    <section class="card hidden" id="card-status">
+      <h2 class="card-title">📡 Status da Requisição</h2>
+      <div id="status-content">
+        <div class="status-row">
+          <span class="label">ID da Consulta</span>
+          <code id="val-check-id">—</code>
+        </div>
+        <div class="status-row">
+          <span class="label">Cidade</span>
+          <span id="val-city">—</span>
+        </div>
+        <div class="status-row">
+          <span class="label">Status</span>
+          <span id="val-status" class="badge badge-queued">queued</span>
+        </div>
+        <div id="polling-indicator" class="polling-indicator hidden">
+          <div class="spinner"></div>
+          <span>Aguardando processamento…</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Card: Snapshot Meteorológico -->
+    <section class="card hidden" id="card-snapshot">
+      <h2 class="card-title">🌡 Snapshot Meteorológico</h2>
+      <div class="snapshot-grid" id="snapshot-grid">
+        <div class="snapshot-item">
+          <span class="snap-label">Localização</span>
+          <span class="snap-value" id="snap-location">—</span>
+        </div>
+        <div class="snapshot-item">
+          <span class="snap-label">Temperatura</span>
+          <span class="snap-value accent" id="snap-temp">—</span>
+        </div>
+        <div class="snapshot-item">
+          <span class="snap-label">Sensação Térmica</span>
+          <span class="snap-value" id="snap-feels">—</span>
+        </div>
+        <div class="snapshot-item">
+          <span class="snap-label">Precipitação</span>
+          <span class="snap-value" id="snap-rain">—</span>
+        </div>
+        <div class="snapshot-item">
+          <span class="snap-label">Vento</span>
+          <span class="snap-value" id="snap-wind">—</span>
+        </div>
+        <div class="snapshot-item">
+          <span class="snap-label">Observado em</span>
+          <span class="snap-value" id="snap-time">—</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Card: Alertas -->
+    <section class="card hidden" id="card-alerts">
+      <h2 class="card-title">⚠️ Alertas Detectados</h2>
+      <div id="alerts-list"></div>
+    </section>
+
+    <!-- Card: Notificações Recentes -->
+    <section class="card" id="card-notifications">
+      <div class="card-title-row">
+        <h2 class="card-title">🔔 Notificações Recentes</h2>
+        <button id="btn-notifications" class="btn btn-secondary">Atualizar notificações</button>
+      </div>
+      <div id="notifications-list">
+        <p class="empty-message">Clique em "Atualizar notificações" para carregar.</p>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="app-footer">
+    <p>ClimaWatch — Sistemas Distribuídos · Deploy em AWS EC2 com Docker Compose</p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

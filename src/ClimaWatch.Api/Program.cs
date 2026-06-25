@@ -18,6 +18,9 @@ builder.Services.AddSingleton<RabbitMqPublisher>();
 
 var app = builder.Build();
 
+app.UseDefaultFiles();   // serve index.html em /
+app.UseStaticFiles();    // serve wwwroot/*
+
 // Aplicação automática de migrações no startup local
 using (var scope = app.Services.CreateScope())
 {
@@ -37,13 +40,13 @@ using (var scope = app.Services.CreateScope())
     }
 }
 
-app.MapGet("/", () => Results.Ok(new
+app.MapHealthChecks("/health");
+
+app.MapGet("/api/status", () => Results.Ok(new
 {
     service = "ClimaWatch.Api",
     status = "running"
 }));
-
-app.MapHealthChecks("/health");
 
 app.MapPost("/api/weather-checks", async (
     WeatherCheckRequest request,
