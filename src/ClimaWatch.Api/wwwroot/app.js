@@ -1,11 +1,13 @@
 'use strict';
 
 /* ── Elementos do DOM ───────────────────────────────────────────────────── */
-const cityInput        = document.getElementById('city-input');
+const ufSelect         = document.getElementById('uf-select');
+const citySelect       = document.getElementById('city-select');
 const btnQuery         = document.getElementById('btn-query');
 const btnNotifications = document.getElementById('btn-notifications');
 const inputError       = document.getElementById('input-error');
 const statusBadge      = document.getElementById('status-badge');
+const dashboardGrid    = document.getElementById('dashboard-grid');
 
 // Status card
 const cardStatus       = document.getElementById('card-status');
@@ -34,6 +36,7 @@ const notificationsList = document.getElementById('notifications-list');
 let pollingInterval  = null;
 const POLL_MS        = 2000;   // intervalo de polling
 const POLL_TIMEOUT   = 60000;  // timeout máximo (60s)
+const FIXED_CITIES   = ['Blumenau', 'Manaus', 'Cuiabá', 'São Paulo'];
 
 /* ── Utilitários ─────────────────────────────────────────────────────────── */
 function formatDate(isoString) {
@@ -82,20 +85,28 @@ function stopPolling() {
 }
 
 function setLoading(active) {
-  btnQuery.disabled = active;
+  btnQuery.disabled = active || !citySelect.value;
   if (active) {
     pollingIndicator.classList.remove('hidden');
     setGlobalBadge('Processando…', 'badge-loading');
+    ufSelect.disabled = true;
+    citySelect.disabled = true;
   } else {
     pollingIndicator.classList.add('hidden');
+    ufSelect.disabled = false;
+    citySelect.disabled = false;
   }
 }
 
 /* ── Fetch helpers ───────────────────────────────────────────────────────── */
 async function apiFetch(url, options = {}) {
+  const headers = options.headers || {};
+  if (!(options.body instanceof FormData)) {
+    headers['Content-Type'] = 'application/json';
+  }
   const res = await fetch(url, {
-    headers: { 'Content-Type': 'application/json' },
     ...options,
+    headers,
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -104,20 +115,101 @@ async function apiFetch(url, options = {}) {
   return res.json();
 }
 
+/* ── Cálculo de Risco ────────────────────────────────────────────────────── */
+function calcRisk(alerts) {
+  if (!Array.isArray(alerts) || alerts.length === 0) {
+    return { level: 'normal', label: 'Normal', text: 'Nenhuma regra de alerta foi atingida.' };
+  }
+  
+  let highestSeverity = 'info';
+  
+  for (const alert of alerts) {
+    const sev = (alert.severity || '').toLowerCase();
+    if (sev === 'critical') {
+      highestSeverity = 'critical';
+      break;
+    } else if (sev === 'warning') {
+      highestSeverity = 'warning';
+    } else if (sev === 'info' && highestSeverity !== 'warning') {
+      highestSeverity = 'info';
+    }
+  }
+  
+  if (highestSeverity === 'critical') {
+    return { level: 'critical', label: 'Crítico', text: 'Vento forte detectado.' };
+  }
+  if (highestSeverity === 'warning') {
+    return { level: 'warning', label: 'Alerta', text: 'Temperatura elevada detectada.' };
+  }
+  
+  return { level: 'attention', label: 'Atenção', text: 'Precipitação detectada.' };
+}
+
+/* ── Fluxo IBGE Selects ─────────────────────────────────────────────────── */
+async function loadUFs() {
+  try {
+    const ufs = await apiFetch('https://servicodados.ibge.gov.br/api/v1/localidades/estados?orderBy=nome');
+    ufSelect.innerHTML = '<option value="">Selecione o estado</option>';
+    ufs.forEach(uf => {
+      const option = document.createElement('option');
+      option.value = uf.sigla;
+      option.textContent = `${uf.sigla} — ${uf.nome}`;
+      ufSelect.appendChild(option);
+    });
+  } catch (err) {
+    ufSelect.innerHTML = '<option value="">Erro ao carregar estados</option>';
+    showError('Não foi possível carregar as UFs (IBGE). Tente recarregar a página.');
+  }
+}
+
+ufSelect.addEventListener('change', async () => {
+  const uf = ufSelect.value;
+  citySelect.innerHTML = '<option value="">Selecione a cidade</option>';
+  citySelect.disabled = true;
+  btnQuery.disabled = true;
+  clearError();
+  
+  if (!uf) {
+    citySelect.innerHTML = '<option value="">Selecione o estado primeiro</option>';
+    return;
+  }
+  
+  citySelect.innerHTML = '<option value="">Carregando cidades...</option>';
+  
+  try {
+    const cities = await apiFetch(`https://servicodados.ibge.gov.br/api/v1/localidades/estados/${uf}/municipios?orderBy=nome`);
+    citySelect.innerHTML = '<option value="">Selecione a cidade</option>';
+    cities.forEach(city => {
+      const option = document.createElement('option');
+      option.value = city.nome;
+      option.textContent = city.nome;
+      citySelect.appendChild(option);
+    });
+    citySelect.disabled = false;
+  } catch (err) {
+    citySelect.innerHTML = '<option value="">Erro ao carregar cidades</option>';
+    showError('Não foi possível carregar as cidades do estado selecionado.');
+  }
+});
+
+citySelect.addEventListener('change', () => {
+  if (citySelect.value) {
+    btnQuery.disabled = false;
+  } else {
+    btnQuery.disabled = true;
+  }
+});
+
 /* ── Fluxo Principal ─────────────────────────────────────────────────────── */
 btnQuery.addEventListener('click', () => startQuery());
-cityInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') startQuery();
-});
 
 async function startQuery() {
   clearError();
   stopPolling();
 
-  const city = cityInput.value.trim();
+  const city = citySelect.value;
   if (!city) {
-    showError('Por favor, informe o nome de uma cidade.');
-    cityInput.focus();
+    showError('Por favor, selecione uma cidade.');
     return;
   }
 
@@ -182,7 +274,6 @@ async function pollStatus(checkId) {
       setGlobalBadge('Falha', 'badge-failed');
       showError(`A consulta falhou: ${data.errorMessage ?? 'Erro desconhecido.'}`);
     }
-    // queued/processing → continua polling
   } catch (err) {
     stopPolling();
     setLoading(false);
@@ -235,7 +326,7 @@ async function loadAlerts(checkId) {
       alertsList.appendChild(div);
     });
   } catch (err) {
-    alertsList.innerHTML = `<p class="error-message">Erro ao carregar alertas: ${err.message}</p>`;
+    alertsList.innerHTML = `<p class="error-message">Erro ao carregar alerts: ${err.message}</p>`;
   }
 }
 
@@ -272,6 +363,122 @@ async function loadNotifications() {
   }
 }
 
+/* ── Dashboard "Monitoramento Rápido" ───────────────────────────────────── */
+function initDashboard() {
+  dashboardGrid.innerHTML = '';
+  const cards = [];
+
+  FIXED_CITIES.forEach(city => {
+    const card = document.createElement('div');
+    card.className = 'db-card';
+    card.dataset.city = city;
+    card.innerHTML = `
+      <div class="db-card-header">
+        <span class="db-card-city">🏙 ${city}</span>
+      </div>
+      <div class="db-card-divider"></div>
+      <div class="db-card-body-loading">
+        <div class="spinner"></div>
+        <span>Carregando…</span>
+      </div>
+    `;
+    dashboardGrid.appendChild(card);
+    cards.push({ city, element: card });
+  });
+
+  // Disparar consultas com 500ms de atraso entre si
+  cards.forEach((card, index) => {
+    setTimeout(() => {
+      queryAndPollCityDashboard(card.city, card.element);
+    }, index * 500);
+  });
+}
+
+async function queryAndPollCityDashboard(city, element) {
+  try {
+    const data = await apiFetch('/api/weather-checks', {
+      method: 'POST',
+      body: JSON.stringify({ city }),
+    });
+
+    const checkId = data.weatherCheckId;
+    let elapsed = 0;
+    
+    const interval = setInterval(async () => {
+      elapsed += POLL_MS;
+      if (elapsed >= POLL_TIMEOUT) {
+        clearInterval(interval);
+        setDashboardCardError(element, city);
+        return;
+      }
+      
+      try {
+        const checkData = await apiFetch(`/api/weather-checks/${checkId}`);
+        if (checkData.status === 'processed') {
+          clearInterval(interval);
+          const snapshot = await apiFetch(`/api/weather-checks/${checkId}/snapshot`);
+          const alerts = await apiFetch(`/api/weather-checks/${checkId}/alerts`);
+          updateDashboardCard(element, city, snapshot, alerts);
+        } else if (checkData.status === 'failed') {
+          clearInterval(interval);
+          setDashboardCardError(element, city);
+        }
+      } catch (err) {
+        clearInterval(interval);
+        setDashboardCardError(element, city);
+      }
+    }, POLL_MS);
+
+  } catch (err) {
+    setDashboardCardError(element, city);
+  }
+}
+
+function updateDashboardCard(element, city, snapshot, alerts) {
+  const risk = calcRisk(alerts);
+  
+  const tempText = snapshot.temperatureC != null ? `${snapshot.temperatureC.toFixed(1)} °C` : '—';
+  const rainText = snapshot.precipitationMm != null ? `${snapshot.precipitationMm.toFixed(1)} mm` : '—';
+  const windText = snapshot.windSpeedKmh != null ? `Vento: ${snapshot.windSpeedKmh.toFixed(1)} km/h` : 'Vento: —';
+  
+  let emoji = '🟢';
+  if (risk.level === 'attention') emoji = '🔵';
+  else if (risk.level === 'warning') emoji = '🟡';
+  else if (risk.level === 'critical') emoji = '🔴';
+
+  element.innerHTML = `
+    <div class="db-card-header">
+      <span class="db-card-city">🏙 ${city}</span>
+    </div>
+    <div class="db-card-divider"></div>
+    <div class="db-card-body">
+      <div class="db-temp-rain">
+        <span class="db-temp">${tempText}</span>
+        <span class="db-dot">·</span>
+        <span class="db-rain">${rainText}</span>
+      </div>
+      <div class="db-wind">${windText}</div>
+    </div>
+    <div class="db-card-divider"></div>
+    <div class="db-card-footer">
+      <span class="risk-badge risk-${risk.level}">${emoji} ${risk.label}</span>
+      <span class="risk-text">${risk.text}</span>
+    </div>
+  `;
+}
+
+function setDashboardCardError(element, city) {
+  element.innerHTML = `
+    <div class="db-card-header">
+      <span class="db-card-city">🏙 ${city}</span>
+    </div>
+    <div class="db-card-divider"></div>
+    <div class="db-card-body-error">
+      ❌ Falhou
+    </div>
+  `;
+}
+
 /* ── Segurança: escape HTML ─────────────────────────────────────────────── */
 function escapeHtml(str) {
   return String(str)
@@ -281,3 +488,9 @@ function escapeHtml(str) {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 }
+
+/* ── Inicialização ──────────────────────────────────────────────────────── */
+document.addEventListener('DOMContentLoaded', () => {
+  loadUFs();
+  initDashboard();
+});

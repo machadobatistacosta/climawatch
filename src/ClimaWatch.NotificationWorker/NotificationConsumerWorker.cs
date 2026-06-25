@@ -169,42 +169,84 @@ public sealed class NotificationConsumerWorker : BackgroundService
 
                 using var scope = _scopeFactory.CreateScope();
                 var dbContext = scope.ServiceProvider.GetRequiredService<ClimaWatchDbContext>();
+                var telegramNotifier = scope.ServiceProvider.GetRequiredService<TelegramNotifier>();
 
                 try
                 {
-                    const string channel = "database";
-
-                    // Idempotência: checar se notificação já existe para (WeatherAlertId, channel)
-                    var existing = await dbContext.Notifications
+                    // 1. Database notification (no changes)
+                    const string dbChannel = "database";
+                    var existingDb = await dbContext.Notifications
                         .FirstOrDefaultAsync(n =>
                             n.WeatherAlertId == alertEvent.WeatherAlertId &&
-                            n.Channel == channel,
+                            n.Channel == dbChannel,
                             stoppingToken);
 
-                    if (existing is not null)
+                    if (existingDb is null)
+                    {
+                        var dbNotification = new Notification
+                        {
+                            Id             = Guid.NewGuid(),
+                            WeatherAlertId = alertEvent.WeatherAlertId,
+                            Channel        = dbChannel,
+                            Status         = "created",
+                            CreatedAtUtc   = DateTimeOffset.UtcNow
+                        };
+
+                        dbContext.Notifications.Add(dbNotification);
+                        await dbContext.SaveChangesAsync(stoppingToken);
+
+                        _logger.LogInformation(
+                            "Notificação database salva. NotificationId: {NotificationId}, WeatherAlertId: {WeatherAlertId}, AlertType: {AlertType}.",
+                            dbNotification.Id, alertEvent.WeatherAlertId, alertEvent.AlertType);
+                    }
+                    else
                     {
                         _logger.LogInformation(
-                            "Notificação já existe para WeatherAlertId {WeatherAlertId} e channel '{Channel}'. Dando ACK sem duplicar.",
-                            alertEvent.WeatherAlertId, channel);
-                        await _channel.BasicAckAsync(deliveryTag: ea.DeliveryTag, multiple: false);
-                        return;
+                            "Notificação database já existe para WeatherAlertId {WeatherAlertId}. Pulando salvamento database.",
+                            alertEvent.WeatherAlertId);
                     }
 
-                    var notification = new Notification
+                    // 2. Telegram notification (conditional)
+                    if (telegramNotifier.IsConfigured)
                     {
-                        Id             = Guid.NewGuid(),
-                        WeatherAlertId = alertEvent.WeatherAlertId,
-                        Channel        = channel,
-                        Status         = "created",
-                        CreatedAtUtc   = DateTimeOffset.UtcNow
-                    };
+                        const string tgChannel = "telegram";
+                        
+                        var existingTg = await dbContext.Notifications
+                            .FirstOrDefaultAsync(n =>
+                                n.WeatherAlertId == alertEvent.WeatherAlertId &&
+                                n.Channel == tgChannel,
+                                stoppingToken);
 
-                    dbContext.Notifications.Add(notification);
-                    await dbContext.SaveChangesAsync(stoppingToken);
+                        if (existingTg is null)
+                        {
+                            _logger.LogInformation("Telegram configurado. Enviando alerta {WeatherAlertId}...", alertEvent.WeatherAlertId);
+                            var success = await telegramNotifier.SendAlertAsync(alertEvent, stoppingToken);
+                            
+                            var status = success ? "sent" : "telegram_failed";
 
-                    _logger.LogInformation(
-                        "Notificação salva. NotificationId: {NotificationId}, WeatherAlertId: {WeatherAlertId}, AlertType: {AlertType}.",
-                        notification.Id, alertEvent.WeatherAlertId, alertEvent.AlertType);
+                            var tgNotification = new Notification
+                            {
+                                Id             = Guid.NewGuid(),
+                                WeatherAlertId = alertEvent.WeatherAlertId,
+                                Channel        = tgChannel,
+                                Status         = status,
+                                CreatedAtUtc   = DateTimeOffset.UtcNow
+                            };
+
+                            dbContext.Notifications.Add(tgNotification);
+                            await dbContext.SaveChangesAsync(stoppingToken);
+
+                            _logger.LogInformation(
+                                "Notificação Telegram salva com status '{Status}'. NotificationId: {NotificationId}, WeatherAlertId: {WeatherAlertId}.",
+                                status, tgNotification.Id, alertEvent.WeatherAlertId);
+                        }
+                        else
+                        {
+                            _logger.LogInformation(
+                                "Notificação Telegram já existe para WeatherAlertId {WeatherAlertId} com status '{Status}'. Pulando envio.",
+                                alertEvent.WeatherAlertId, existingTg.Status);
+                        }
+                    }
 
                     await _channel.BasicAckAsync(deliveryTag: ea.DeliveryTag, multiple: false);
                 }

@@ -12,6 +12,7 @@ var connectionString = builder.Configuration.GetConnectionString("ClimaWatch")
 builder.Services.AddDbContext<ClimaWatchDbContext>(options =>
     options.UseNpgsql(connectionString));
 
+builder.Services.AddHttpClient<TelegramNotifier>();
 builder.Services.AddHostedService<NotificationConsumerWorker>();
 
 var host = builder.Build();

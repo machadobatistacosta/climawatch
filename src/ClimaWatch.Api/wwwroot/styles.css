@@ -374,3 +374,139 @@ body {
   .card-title-row { flex-direction: column; align-items: flex-start; }
   .snapshot-grid { grid-template-columns: 1fr 1fr; }
 }
+
+/* ── Select Dropdown Styling ──────────────────────────────── */
+select.select-input {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg fill='%238b949e' height='24' viewBox='0 0 24 24' width='24' xmlns='http://www.w3.org/2000/svg'><path d='M7 10l5 5 5-5z'/><path d='M0 0h24v24H0z' fill='none'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 0.75rem center;
+  background-size: 1.25rem;
+  padding-right: 2.25rem;
+  cursor: pointer;
+}
+
+select.select-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+select.select-input option {
+  background: var(--surface);
+  color: var(--text);
+}
+
+/* ── Dashboard Grid & Cards ───────────────────────────────── */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1rem;
+}
+
+.db-card {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  transition: transform 0.2s, border-color 0.2s;
+}
+
+.db-card:hover {
+  border-color: var(--accent);
+  transform: translateY(-2px);
+}
+
+.db-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.db-card-city {
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+.db-card-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 0.25rem 0;
+}
+
+.db-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.db-card-body-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem 0;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.db-card-body-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem 0;
+  color: var(--danger);
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.db-temp-rain {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+}
+
+.db-temp {
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.db-dot {
+  color: var(--text-muted);
+}
+
+.db-rain, .db-wind {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.db-card-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.8rem;
+}
+
+.risk-badge {
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.risk-text {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+/* ── Badges de Risco (Cores) ───────────────────────────────── */
+.risk-normal { color: var(--success); }
+.risk-attention { color: var(--info); }
+.risk-warning { color: var(--warning); }
+.risk-critical { color: var(--danger); }

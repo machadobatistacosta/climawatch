@@ -23,19 +23,25 @@
 
   <main class="container">
 
+    <!-- Card: Monitoramento Rápido -->
+    <section class="card" id="card-dashboard">
+      <h2 class="card-title">📡 Monitoramento Rápido</h2>
+      <div class="dashboard-grid" id="dashboard-grid">
+        <!-- Cards gerados por JS para cada cidade -->
+      </div>
+    </section>
+
     <!-- Card: Consulta -->
     <section class="card" id="card-query">
-      <h2 class="card-title">🔍 Consultar Clima</h2>
+      <h2 class="card-title">🔍 Consultar Clima por Estado/Município</h2>
       <div class="search-row">
-        <input
-          type="text"
-          id="city-input"
-          class="city-input"
-          placeholder="Digite o nome de uma cidade... (ex: Manaus)"
-          autocomplete="off"
-          maxlength="120"
-        />
-        <button id="btn-query" class="btn btn-primary">Consultar Clima</button>
+        <select id="uf-select" class="city-input select-input">
+          <option value="">Carregando estados...</option>
+        </select>
+        <select id="city-select" class="city-input select-input" disabled>
+          <option value="">Selecione o estado primeiro</option>
+        </select>
+        <button id="btn-query" class="btn btn-primary" disabled>Consultar Clima</button>
       </div>
       <p id="input-error" class="input-error hidden"></p>
     </section>
@@ -100,10 +106,13 @@
       <div id="alerts-list"></div>
     </section>
 
-    <!-- Card: Notificações Recentes -->
+    <!-- Card: Notificações -->
     <section class="card" id="card-notifications">
       <div class="card-title-row">
-        <h2 class="card-title">🔔 Notificações Recentes</h2>
+        <div>
+          <h2 class="card-title">🔔 Notificações internas e externas</h2>
+          <p class="subtitle" style="margin-top: 0.25rem;">O NotificationWorker registra notificações no banco e, se configurado, envia alertas via Telegram.</p>
+        </div>
         <button id="btn-notifications" class="btn btn-secondary">Atualizar notificações</button>
       </div>
       <div id="notifications-list">

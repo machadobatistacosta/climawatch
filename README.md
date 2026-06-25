@@ -133,3 +133,17 @@ Você pode forçar o envio de mensagens para a DLQ publicando payloads inválido
    climawatch.alerts           0   1
    ```
 
+---
+
+## Notificações via Telegram (Opcional)
+
+O **NotificationWorker** pode enviar alertas reais para o Telegram. Para habilitar essa funcionalidade:
+
+1. Crie um Bot no Telegram usando o [@BotFather](https://t.me/BotFather) e copie o Token gerado.
+2. Descubra o Chat ID do chat ou canal para onde deseja enviar os alertas (ex: usando bots como [@userinfobot](https://t.me/userinfobot) ou chamando a API de `getUpdates`).
+3. Adicione essas informações no seu arquivo `.env`:
+   ```properties
+   TELEGRAM_BOT_TOKEN=seu_token_aqui
+   TELEGRAM_CHAT_ID=seu_chat_id_aqui
+   ```
+4. Se essas variáveis estiverem vazias ou ausentes, o worker apenas salvará as notificações no banco local com canal `database` e status `created`, sem tentar contatar o Telegram.
